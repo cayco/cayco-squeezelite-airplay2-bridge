@@ -1,0 +1,80 @@
+--- a/output_alsa.c
++++ b/output_alsa.c
+@@ -227,27 +227,11 @@
+ }
+ 
+ void set_volume(unsigned left, unsigned right) {
+-	float ldB, rdB;
+-
+-	if (!alsa.volume_mixer_name) {
+-		LOG_DEBUG("setting internal gain left: %u right: %u", left, right);
+-		LOCK;
+-		output.gainL = left;
+-		output.gainR = right;
+-		UNLOCK;
+-		return;
+-	} else {
+-		LOCK;
+-		output.gainL = FIXED_ONE;
+-		output.gainR = FIXED_ONE;
+-		UNLOCK;
+-	}
+-
+-	// convert 16.16 fixed point to dB
+-	ldB = 20 * log10( left  / 65536.0F );
+-	rdB = 20 * log10( right / 65536.0F );
+-
+-	set_mixer(false, ldB, rdB);
++	LOG_DEBUG("locking internal gain to FIXED_ONE (100%%) for bit-perfect output");
++	LOCK;
++	output.gainL = FIXED_ONE;
++	output.gainR = FIXED_ONE;
++	UNLOCK;
+ }
+ 
+ static void *alsa_error_handler(const char *file, int line, const char *function, int err, const char *fmt, ...) {
+--- a/output_stdout.c
++++ b/output_stdout.c
+@@ -22,6 +22,7 @@
+ // Stdout output
+ 
+ #include "squeezelite.h"
++#include <unistd.h>
+ 
+ #define FRAME_BLOCK MAX_SILENCE_FRAMES
+ 
+@@ -50,18 +51,15 @@
+ 
+ 	u8_t *obuf;
+ 
+-	if (!silence) {
+-		
+-		if (output.fade == FADE_ACTIVE && output.fade_dir == FADE_CROSS && *cross_ptr) {
+-			_apply_cross(outputbuf, out_frames, cross_gain_in, cross_gain_out, cross_ptr);
+-		}
++	if (silence) {
++		return (int)out_frames;
++	}
+ 
+-		obuf = outputbuf->readp;
++	if (output.fade == FADE_ACTIVE && output.fade_dir == FADE_CROSS && *cross_ptr) {
++		_apply_cross(outputbuf, out_frames, cross_gain_in, cross_gain_out, cross_ptr);
++	}
+ 
+-	} else {
+-
+-		obuf = silencebuf;
+-	}
++	obuf = outputbuf->readp;
+ 
+ 	IF_DSD(
+ 		   if (output.outfmt != PCM) {
+@@ -115,6 +113,8 @@
+ 		if (buffill) {
+ 			fwrite(buf, bytes_per_frame, buffill, stdout);
+ 			buffill = 0;
++		} else {
++			usleep(5000);
+ 		}
+ 
+ 	}

@@ -1,0 +1,41 @@
+# Local compiled binaries & C build artifacts
+/squeezelite
+*.o
+*.so
+*.a
+*.out
+
+# Python virtual environments & caches
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment, secrets & local overrides
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+*.pem
+*.key
+
+# Backups, logs & temporary files
+*.bak
+*.orig
+*.rej
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

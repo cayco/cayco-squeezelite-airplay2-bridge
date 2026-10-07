@@ -1,0 +1,66 @@
+services:
+  zone1:
+    build: .
+    image: squeezelite-airplay:latest
+    container_name: ${ZONE1_CONTAINER_NAME:-squeezelite-zone1}
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./bridge.py:/app/bridge.py:ro
+    environment:
+      - LMS_HOST=${LMS_HOST:-192.168.1.10}
+      - LMS_PORT=${LMS_PORT:-3483}
+      - LMS_CLI_PORT=${LMS_CLI_PORT:-9090}
+      - PLAYER_NAME=${ZONE1_PLAYER_NAME:-Zone1}
+      - PLAYER_MAC=${ZONE1_PLAYER_MAC:-aa:aa:00:00:00:01}
+      - AIRPLAY_ID=${ZONE1_AIRPLAY_ID:-AABBCCDDEE01}
+      - AIRPLAY_IP=${ZONE1_AIRPLAY_IP:-192.168.1.101}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  zone2:
+    build: .
+    image: squeezelite-airplay:latest
+    container_name: ${ZONE2_CONTAINER_NAME:-squeezelite-zone2}
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./bridge.py:/app/bridge.py:ro
+    environment:
+      - LMS_HOST=${LMS_HOST:-192.168.1.10}
+      - LMS_PORT=${LMS_PORT:-3483}
+      - LMS_CLI_PORT=${LMS_CLI_PORT:-9090}
+      - PLAYER_NAME=${ZONE2_PLAYER_NAME:-Zone2}
+      - PLAYER_MAC=${ZONE2_PLAYER_MAC:-aa:aa:00:00:00:02}
+      - AIRPLAY_ID=${ZONE2_AIRPLAY_ID:-AABBCCDDEE02}
+      - AIRPLAY_IP=${ZONE2_AIRPLAY_IP:-192.168.1.102}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  zone3:
+    build: .
+    image: squeezelite-airplay:latest
+    container_name: ${ZONE3_CONTAINER_NAME:-squeezelite-zone3}
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./bridge.py:/app/bridge.py:ro
+    environment:
+      - LMS_HOST=${LMS_HOST:-192.168.1.10}
+      - LMS_PORT=${LMS_PORT:-3483}
+      - LMS_CLI_PORT=${LMS_CLI_PORT:-9090}
+      - PLAYER_NAME=${ZONE3_PLAYER_NAME:-Zone3}
+      - PLAYER_MAC=${ZONE3_PLAYER_MAC:-aa:aa:00:00:00:03}
+      - AIRPLAY_ID=${ZONE3_AIRPLAY_ID:-AABBCCDDEE03}
+      - AIRPLAY_IP=${ZONE3_AIRPLAY_IP:-192.168.1.103}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
