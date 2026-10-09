@@ -111,7 +111,11 @@ static void *output_thread() {
 		UNLOCK;
 
 		if (buffill) {
-			fwrite(buf, bytes_per_frame, buffill, stdout);
+			if (fwrite(buf, bytes_per_frame, buffill, stdout) != buffill) {
+				running = false;
+				break;
+			}
+			fflush(stdout);
 			buffill = 0;
 		} else {
 			usleep(5000);

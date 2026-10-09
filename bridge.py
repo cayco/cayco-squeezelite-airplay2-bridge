@@ -226,7 +226,7 @@ class SqueezeliteAirplayBridge:
                 await asyncio.sleep(0.05)
 
     async def sync_volume_lms(self):
-        mac_encoded = urllib.parse.quote(self.player_mac)
+        mac_encoded = urllib.parse.quote(self.player_mac).lower()
         while self.running:
             try:
                 reader, writer = await asyncio.open_connection(self.lms_host, self.lms_cli_port)
@@ -322,7 +322,22 @@ class SqueezeliteAirplayBridge:
                 self.is_streaming = True
                 force_scan = False
                 _LOGGER.info("AirPlay 2 streaming active for %s", self.player_name)
-                await self.atv.stream.stream_file(source)
+
+                async def _enforce_homepod_volume():
+                    for delay in (1.5, 4.0):
+                        await asyncio.sleep(delay)
+                        if self.is_streaming and self.atv and self.atv.audio:
+                            try:
+                                await self.atv.audio.set_volume(self.current_volume)
+                                _LOGGER.info("Post-start volume confirmed at %.1f%% on %s", self.current_volume, self.player_name)
+                            except Exception as ve:
+                                _LOGGER.debug("Post-start volume error on %s: %s", self.player_name, ve)
+
+                vol_task = asyncio.create_task(_enforce_homepod_volume())
+                try:
+                    await self.atv.stream.stream_file(source)
+                finally:
+                    vol_task.cancel()
                 _LOGGER.info("AirPlay 2 stream closed for %s (idle=%s)", self.player_name, self.is_idle)
             except Exception as e:
                 _LOGGER.error("AirPlay 2 streaming exception for %s: %s. Reconnecting in 3s...", self.player_name, e)
@@ -360,6 +375,11 @@ class SqueezeliteAirplayBridge:
 def handle_shutdown(bridge, loop):
     _LOGGER.info("Shutting down bridge...")
     bridge.running = False
+    if bridge.proc:
+        try:
+            bridge.proc.kill()
+        except Exception:
+            pass
     bridge.wake_event.set()
     for task in asyncio.all_tasks(loop):
         task.cancel()
