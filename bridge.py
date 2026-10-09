@@ -233,7 +233,7 @@ class SqueezeliteAirplayBridge:
 
                 # Lock digital volume to 100% in LMS (dvc=0) so squeezelite outputs
                 # bit-perfect 16-bit PCM and the HomePod handles hardware attenuation.
-                writer.write(f"{self.player_mac} playerpref digitalVolumeControl 0\n".encode())
+                # writer.write(f"{self.player_mac} playerpref digitalVolumeControl 0\n".encode())
                 writer.write(f"{self.player_mac} power 1\n".encode())
                 writer.write(f"{self.player_mac} mixer volume ?\n".encode())
                 writer.write(b"listen 1\n")
