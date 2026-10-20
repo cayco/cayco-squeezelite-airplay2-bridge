@@ -4,6 +4,7 @@ import ipaddress
 import logging
 import os
 import signal
+import socket
 import sys
 import time
 import urllib.parse
@@ -228,8 +229,18 @@ class SqueezeliteAirplayBridge:
     async def sync_volume_lms(self):
         mac_encoded = urllib.parse.quote(self.player_mac).lower()
         while self.running:
+            writer = None
             try:
-                reader, writer = await asyncio.open_connection(self.lms_host, self.lms_cli_port)
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.lms_host, self.lms_cli_port),
+                    timeout=10.0,
+                )
+                sock = writer.get_extra_info("socket")
+                if sock is not None:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    for opt, val in (("TCP_KEEPIDLE", 15), ("TCP_KEEPINTVL", 5), ("TCP_KEEPCNT", 3)):
+                        if hasattr(socket, opt):
+                            sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
 
                 # Lock digital volume to 100% in LMS (dvc=0) so squeezelite outputs
                 # bit-perfect 16-bit PCM and the HomePod handles hardware attenuation.
@@ -237,14 +248,23 @@ class SqueezeliteAirplayBridge:
                 writer.write(f"{self.player_mac} power 1\n".encode())
                 writer.write(f"{self.player_mac} mixer volume ?\n".encode())
                 writer.write(b"listen 1\n")
-                await writer.drain()
+                await asyncio.wait_for(writer.drain(), timeout=5.0)
                 _LOGGER.info("Connected to LMS CLI at %s:%s",
                              self.lms_host, self.lms_cli_port)
+                initial_sync = True
 
                 while self.running:
-                    line = await reader.readline()
+                    is_poll = False
+                    try:
+                        line = await asyncio.wait_for(reader.readline(), timeout=20.0)
+                    except asyncio.TimeoutError:
+                        is_poll = True
+                        writer.write(f"{self.player_mac} mixer volume ?\n".encode())
+                        await asyncio.wait_for(writer.drain(), timeout=5.0)
+                        line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+
                     if not line:
-                        break
+                        raise ConnectionError("LMS CLI connection closed by peer")
                     decoded = line.decode("utf-8", errors="replace").strip()
                     parts = decoded.split()
                     if not parts or parts[0].lower() != mac_encoded:
@@ -252,23 +272,34 @@ class SqueezeliteAirplayBridge:
 
                     if len(parts) >= 4 and parts[1] == "mixer" and parts[2] == "volume":
                         vol_raw = urllib.parse.unquote(parts[3])
+                        if vol_raw == "?":
+                            continue
                         try:
                             if vol_raw.startswith("+") or vol_raw.startswith("-"):
                                 new_vol = self.current_volume + float(vol_raw)
                             else:
                                 new_vol = float(vol_raw)
-                            self.current_volume = max(0.0, min(100.0, new_vol))
-                            if self.is_streaming and self.atv and self.atv.audio:
+                            clamped_vol = max(0.0, min(100.0, new_vol))
+                            vol_changed = initial_sync or (abs(clamped_vol - self.current_volume) >= 0.05)
+                            initial_sync = False
+                            self.current_volume = clamped_vol
+                            if vol_changed:
+                                _LOGGER.info("Synced LMS volume for %s: %.1f%%", self.player_name, self.current_volume)
+                            if (not is_poll or vol_changed) and self.is_streaming and self.atv and self.atv.audio:
                                 _LOGGER.info("Applying volume to HomePod %s: %.1f%%", self.player_name, self.current_volume)
                                 await self.atv.audio.set_volume(self.current_volume)
                         except Exception as e:
                             _LOGGER.warning("Error parsing volume %s: %s", vol_raw, e)
-
-                writer.close()
-                await writer.wait_closed()
             except Exception as e:
                 _LOGGER.warning("LMS CLI error: %s. Reconnecting in 5s...", e)
                 await asyncio.sleep(5)
+            finally:
+                if writer is not None:
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
 
     async def _build_config(self, loop, force_scan=False):
         if self.airplay_ip and self.airplay_id and not force_scan:
