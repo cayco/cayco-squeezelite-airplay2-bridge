@@ -24,8 +24,8 @@ logging.basicConfig(
 _LOGGER = logging.getLogger("bridge")
 
 IDLE_TIMEOUT = float(os.environ.get("IDLE_TIMEOUT", "30.0"))
-MAX_BUFFER_BYTES = int(os.environ.get("MAX_BUFFER_BYTES", "264600"))  # ~1.5s of 44.1kHz 16-bit stereo
-PREBUFFER_BYTES = int(os.environ.get("PREBUFFER_BYTES", "70560"))    # ~400ms
+MAX_BUFFER_BYTES = int(os.environ.get("MAX_BUFFER_BYTES", "264600"))  # ~1.5s sliding window during connect
+PREBUFFER_BYTES = int(os.environ.get("PREBUFFER_BYTES", "16896"))    # 12 AirPlay packets (~95.8ms)
 
 # Full AirPlay 2 RAOP TXT properties required by pyatv so that:
 # 1. get_protocol_version() selects AirPlayMajorVersion.AirPlayV2 (via ft bits 38 & 48)
@@ -69,7 +69,8 @@ class RingBufferAudioSource(AudioSource):
     - Consumes from bridge.audio_buffer at 1.0x real-time speed.
     - When idle (no audio for > IDLE_TIMEOUT seconds), signals EOF (NO_FRAMES)
       to tear down AirPlay 2 session cleanly so HomePods enter sleep.
-    - Prebuffers ~400ms before starting playback for glitch-free streaming.
+    - Locks buffer depth to PREBUFFER_BYTES (~95.8ms) across all zones for
+      deterministic multi-room synchronization.
     """
     def __init__(self, bridge, max_buffer_bytes=MAX_BUFFER_BYTES, prebuffer_bytes=PREBUFFER_BYTES):
         self.bridge = bridge
@@ -77,10 +78,7 @@ class RingBufferAudioSource(AudioSource):
         self.prebuffer = prebuffer_bytes
         self.buffer = bridge.audio_buffer
         self.running = True
-        self.buffering = len(self.buffer) < self.prebuffer
-        if not self.buffering:
-            _LOGGER.info("Pre-buffer already filled (%d bytes) for %s, streaming audio",
-                         len(self.buffer), self.bridge.player_name)
+        self.buffering = True
 
     async def readframes(self, nframes: int) -> bytes:
         if not self.running or self.bridge.is_idle:
@@ -91,13 +89,24 @@ class RingBufferAudioSource(AudioSource):
         if self.buffering:
             if len(self.buffer) >= self.prebuffer:
                 self.buffering = False
-                _LOGGER.info("Pre-buffer filled (%d bytes) for %s, streaming audio",
+                if len(self.buffer) > self.prebuffer + needed:
+                    excess = len(self.buffer) - self.prebuffer
+                    excess -= excess % 4
+                    del self.buffer[:excess]
+                _LOGGER.info("Pre-buffer locked (%d bytes) for %s, streaming audio",
                              len(self.buffer), self.bridge.player_name)
             else:
                 return b"\x00" * needed
 
         if len(self.buffer) < needed:
+            self.buffering = True
             return b"\x00" * needed
+
+        max_allowed = self.prebuffer * 2
+        if len(self.buffer) > max_allowed:
+            excess = len(self.buffer) - self.prebuffer
+            excess -= excess % 4
+            del self.buffer[:excess]
 
         chunk = bytes(self.buffer[:needed])
         del self.buffer[:needed]
@@ -171,27 +180,14 @@ class SqueezeliteAirplayBridge:
         )
 
     async def drain_squeezelite_stdout(self):
-        zeros_4096 = b"\x00" * 4096
+        zeros_1408 = b"\x00" * 1408
         while self.running:
             try:
-                # Apply backpressure whenever we are awake (including while AirPlay 2
-                # is completing its handshake) so squeezelite blocks on stdout instead
-                # of draining the track at unthrottled CPU speed.
-                while self.running and not self.is_idle and len(self.audio_buffer) >= MAX_BUFFER_BYTES:
-                    if not self.is_streaming and (time.monotonic() - self.last_audio_time > IDLE_TIMEOUT):
-                        _LOGGER.info("AirPlay not consuming for %.0fs on %s, resetting to idle",
-                                     IDLE_TIMEOUT, self.player_name)
-                        self.is_idle = True
-                        self.wake_event.clear()
-                        self.audio_buffer.clear()
-                        break
-                    await asyncio.sleep(0.01)
-
                 try:
                     chunk = await asyncio.wait_for(self.proc.stdout.read(4096), timeout=1.0)
                 except asyncio.TimeoutError:
-                    # Custom squeezelite output_stdout.c writes 0 bytes when silence=true
-                    # (paused/stopped/off). Check idle timeout every 1s!
+                    # Custom squeezelite output_stdout.c writes 0 bytes when stopped/off/buffering.
+                    # Check idle timeout every 1s!
                     if not self.is_idle and (time.monotonic() - self.last_audio_time > IDLE_TIMEOUT):
                         _LOGGER.info("No audio for %.0fs on %s, closing AirPlay 2 session (idle sleep)",
                                      IDLE_TIMEOUT, self.player_name)
@@ -204,7 +200,7 @@ class SqueezeliteAirplayBridge:
                     await asyncio.sleep(0.05)
                     continue
 
-                is_silent = (chunk == zeros_4096) if len(chunk) == 4096 else (chunk == b"\x00" * len(chunk))
+                is_silent = (chunk == zeros_1408) if len(chunk) == 1408 else (chunk == b"\x00" * len(chunk))
 
                 if not is_silent:
                     self.trigger_wake()
@@ -222,6 +218,11 @@ class SqueezeliteAirplayBridge:
                             self.audio_buffer.extend(chunk)
                     else:
                         await asyncio.sleep(0.02)
+
+                if len(self.audio_buffer) > MAX_BUFFER_BYTES:
+                    excess = len(self.audio_buffer) - MAX_BUFFER_BYTES
+                    excess -= excess % 4
+                    del self.audio_buffer[:excess]
             except Exception as e:
                 _LOGGER.debug("Stdout reader exception: %s", e)
                 await asyncio.sleep(0.05)

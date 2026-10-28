@@ -19,12 +19,16 @@
  *
  */
 
-// Stdout output
+// Stdout output with high-resolution CLOCK_MONOTONIC real-time pacing
 
 #include "squeezelite.h"
 #include <unistd.h>
+#include <time.h>
+#include <stdint.h>
+#include <errno.h>
 
-#define FRAME_BLOCK MAX_SILENCE_FRAMES
+// Match AirPlay 2 RTP packet size (352 frames = 7.98ms at 44.1kHz)
+#define FRAME_BLOCK 352
 
 static log_level loglevel;
 
@@ -46,20 +50,40 @@ static u8_t *buf;
 static unsigned buffill;
 static int bytes_per_frame;
 
+static uint64_t get_monotonic_ns(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void sleep_until_ns(uint64_t target_ns) {
+	struct timespec ts;
+	ts.tv_sec = (time_t)(target_ns / 1000000000ULL);
+	ts.tv_nsec = (long)(target_ns % 1000000000ULL);
+	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR && running) {
+	}
+}
+
 static int _stdout_write_frames(frames_t out_frames, bool silence, s32_t gainL, s32_t gainR, u8_t flags,
 								s32_t cross_gain_in, s32_t cross_gain_out, s32_t **cross_ptr) {
 
 	u8_t *obuf;
 
 	if (silence) {
-		return (int)out_frames;
+		// Emit silence bytes to stdout ONLY during active mid-stream sync pause
+		// (OUTPUT_PAUSE_FRAMES from LMS pauseForInterval) so downstream AirPlay
+		// buffer delays by the exact requested interval. When stopped/off/buffering/start_at,
+		// emit 0 bytes so bridge.py detects idle state and does not pre-fill silence.
+		if (output.state != OUTPUT_PAUSE_FRAMES) {
+			return (int)out_frames;
+		}
+		obuf = silencebuf;
+	} else {
+		if (output.fade == FADE_ACTIVE && output.fade_dir == FADE_CROSS && *cross_ptr) {
+			_apply_cross(outputbuf, out_frames, cross_gain_in, cross_gain_out, cross_ptr);
+		}
+		obuf = outputbuf->readp;
 	}
-
-	if (output.fade == FADE_ACTIVE && output.fade_dir == FADE_CROSS && *cross_ptr) {
-		_apply_cross(outputbuf, out_frames, cross_gain_in, cross_gain_out, cross_ptr);
-	}
-
-	obuf = outputbuf->readp;
 
 	IF_DSD(
 		   if (output.outfmt != PCM) {
@@ -93,20 +117,28 @@ static void *output_thread() {
 		bytes_per_frame = 2 * 2; break;
 	default:
 		bytes_per_frame = 4 * 2; break;
-		break;
 	}
 
 	UNLOCK;
 
+	uint64_t epoch_ns = get_monotonic_ns();
+	uint64_t paced_frames = 0;
+	unsigned current_rate = 44100;
+
 	while (running) {
+		frames_t frames_done;
+		unsigned rate;
+		bool active;
 
 		LOCK;
+
+		frames_done = _output_frames(FRAME_BLOCK);
+		rate = output.current_sample_rate ? output.current_sample_rate : 44100;
+		active = (output.state == OUTPUT_RUNNING || output.state == OUTPUT_PAUSE_FRAMES || output.state == OUTPUT_START_AT);
 
 		output.device_frames = 0;
 		output.updated = gettime_ms();
 		output.frames_played_dmp = output.frames_played;
-
-		_output_frames(FRAME_BLOCK);
 
 		UNLOCK;
 
@@ -117,10 +149,39 @@ static void *output_thread() {
 			}
 			fflush(stdout);
 			buffill = 0;
-		} else {
-			usleep(5000);
 		}
 
+		if (!active) {
+			usleep(2000);
+			epoch_ns = get_monotonic_ns();
+			paced_frames = 0;
+			current_rate = rate;
+			continue;
+		}
+
+		if (rate != current_rate) {
+			epoch_ns = get_monotonic_ns();
+			paced_frames = 0;
+			current_rate = rate;
+		}
+
+		if (frames_done == 0) {
+			frames_done = rate / 1000;
+			if (frames_done == 0) frames_done = 1;
+		}
+
+		paced_frames += frames_done;
+		uint64_t secs = paced_frames / rate;
+		uint64_t rem = paced_frames % rate;
+		uint64_t target_ns = epoch_ns + secs * 1000000000ULL + (rem * 1000000000ULL) / rate;
+		uint64_t now_ns = get_monotonic_ns();
+
+		if (now_ns > target_ns + 50000000ULL) {
+			epoch_ns = now_ns;
+			paced_frames = 0;
+		} else if (target_ns > now_ns) {
+			sleep_until_ns(target_ns);
+		}
 	}
 
 	return 0;
@@ -133,7 +194,7 @@ void output_init_stdout(log_level level, unsigned output_buf_size, char *params,
 
 	LOG_INFO("init output stdout");
 
-	buf = malloc(FRAME_BLOCK * BYTES_PER_FRAME);
+	buf = malloc(MAX_SILENCE_FRAMES * BYTES_PER_FRAME);
 	if (!buf) {
 		LOG_ERROR("unable to malloc buf");
 		return;
@@ -143,7 +204,7 @@ void output_init_stdout(log_level level, unsigned output_buf_size, char *params,
 	memset(&output, 0, sizeof(output));
 
 	output.format = S32_LE;
-	output.start_frames = FRAME_BLOCK * 2;
+	output.start_frames = MAX_SILENCE_FRAMES * 2;
 	output.write_cb = &_stdout_write_frames;
 	output.rate_delay = rate_delay;
 

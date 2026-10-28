@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     squeezelite \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir pyatv
+RUN pip install --no-cache-dir pyatv "srptools<2"
 
 WORKDIR /app
 COPY --from=builder /squeezelite-src/squeezelite /usr/bin/squeezelite
